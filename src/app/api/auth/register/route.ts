@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import bcrypt from "bcryptjs";
 import { registerSchema } from "@/lib/validations/auth";
+import { sendOTPEmail } from "@/lib/resend";
 import { z } from "zod";
 
 export async function POST(request: Request) {
@@ -24,20 +25,38 @@ export async function POST(request: Request) {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    // Create user
+    // Create user (unverified by default)
     const user = await db.user.create({
       data: {
         name,
         email,
         hashedPassword,
         role: "CLIENT",
+        emailVerified: null,
       },
     });
+
+    // Generate 6-digit OTP code
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    // Save OTP token to DB
+    await db.oTPToken.create({
+      data: {
+        email,
+        code: otpCode,
+        expires,
+      },
+    });
+
+    // Send OTP email via Resend
+    await sendOTPEmail(email, otpCode);
 
     return NextResponse.json(
       {
         success: true,
-        message: "Akun berhasil dibuat",
+        requireOTP: true,
+        message: "Akun berhasil dibuat. Kode OTP telah dikirim ke email Anda.",
         user: {
           id: user.id,
           name: user.name,

@@ -21,12 +21,9 @@ function VerifyOTPContent() {
   const [countdown, setCountdown] = useState(0);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
-  // Send OTP on mount
+  // Set initial countdown on mount
   useEffect(() => {
-    if (email) {
-      handleSendOTP();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setCountdown(60);
   }, []);
 
   // Countdown timer

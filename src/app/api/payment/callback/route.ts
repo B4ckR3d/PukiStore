@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { sendOrderSuccessEmail } from "@/lib/resend";
 
 /**
  * Official KlikQRIS Webhook Callback
@@ -28,6 +29,7 @@ export async function POST(request: Request) {
       },
       include: {
         payment: true,
+        user: true,
         items: {
           include: {
             product: true,
@@ -122,6 +124,27 @@ export async function POST(request: Request) {
           data: { balance: { increment: sellerAmount } },
         });
       }
+
+      // Send order details & digital codes via Resend email to customer
+      if (order.user?.email) {
+        const updatedItems = await db.orderItem.findMany({
+          where: { orderId: order.id },
+          include: { product: true },
+        });
+
+        await sendOrderSuccessEmail({
+          toEmail: order.user.email,
+          customerName: order.user.name || undefined,
+          orderNumber: order.orderNumber,
+          totalAmount: Number(order.totalAmount),
+          items: updatedItems.map((item) => ({
+            name: item.product.name,
+            quantity: item.quantity,
+            price: Number(item.price),
+            codes: item.deliveredCodes,
+          })),
+        });
+      }
     } else if (rawStatus === "EXPIRED" || rawStatus === "FAILED") {
       if (order.payment) {
         await db.payment.update({
@@ -139,7 +162,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ status: true, message: "Webhook acknowledged" });
   } catch (error) {
     console.error("KlikQRIS Webhook error:", error);
-    // Respond with 200 OK so KlikQRIS doesn't loop infinite retries
     return NextResponse.json({ status: true, message: "Error handled" });
   }
 }

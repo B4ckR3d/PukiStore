@@ -44,19 +44,8 @@ export default function RegisterPage() {
         return;
       }
 
-      toast.success("Akun berhasil dibuat!");
-
-      // Auto sign in after register
-      const signInResult = await signIn("credentials", {
-        email: data.email,
-        password: data.password,
-        redirect: false,
-      });
-
-      if (signInResult?.ok) {
-        // Redirect to OTP verification
-        router.push(`/verify-otp?email=${encodeURIComponent(data.email)}`);
-      }
+      toast.success("Kode OTP verifikasi telah dikirim ke email Anda!");
+      router.push(`/verify-otp?email=${encodeURIComponent(data.email)}`);
     } catch {
       toast.error("Terjadi kesalahan");
     }

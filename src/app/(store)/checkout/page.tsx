@@ -38,6 +38,7 @@ export default function CheckoutPage() {
     qrisUrl: string;
     transactionId: string;
     expiredAt: string;
+    amount: number;
   } | null>(null);
 
   const total = getTotal();
@@ -92,6 +93,7 @@ export default function CheckoutPage() {
         qrisUrl: paymentResult.data.qrisUrl,
         transactionId: paymentResult.data.transactionId,
         expiredAt: paymentResult.data.expiredAt,
+        amount: paymentResult.data.amount || total,
       });
 
       clearCart();
@@ -127,7 +129,7 @@ export default function CheckoutPage() {
             </div>
 
             <div className="text-2xl font-bold text-primary">
-              {formatPrice(total)}
+              {formatPrice(paymentData.amount)}
             </div>
 
             <div className="space-y-2 text-sm">
