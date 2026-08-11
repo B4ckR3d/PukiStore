@@ -10,6 +10,7 @@ import { loginSchema } from "@/lib/validations/auth";
  * This file is imported by middleware.ts which runs on the Edge runtime.
  */
 export default {
+  trustHost: true,
   providers: [
     Google({
       clientId: process.env.GOOGLE_CLIENT_ID,
@@ -87,9 +88,11 @@ export default {
         nextUrl.pathname.startsWith("/login") ||
         nextUrl.pathname.startsWith("/register");
 
+      const baseUrl = process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL || nextUrl.origin;
+
       // Redirect logged-in users away from auth pages
       if (isAuthRoute && isLoggedIn) {
-        return Response.redirect(new URL("/dashboard", nextUrl));
+        return Response.redirect(new URL("/dashboard", baseUrl));
       }
 
       // Protect dashboard routes
@@ -99,7 +102,7 @@ export default {
 
       // Admin-only routes
       if (isAdminRoute && auth?.user?.role !== "ADMIN") {
-        return Response.redirect(new URL("/dashboard", nextUrl));
+        return Response.redirect(new URL("/dashboard", baseUrl));
       }
 
       // Seller-only routes
@@ -108,7 +111,7 @@ export default {
         auth?.user?.role !== "SELLER" &&
         auth?.user?.role !== "ADMIN"
       ) {
-        return Response.redirect(new URL("/dashboard", nextUrl));
+        return Response.redirect(new URL("/dashboard", baseUrl));
       }
 
       return true;
