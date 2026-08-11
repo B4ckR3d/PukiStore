@@ -1,71 +1,73 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { klikqris } from "@/lib/klikqris";
 
 /**
- * KlikQRIS Webhook Callback
- * This endpoint receives payment status updates from KlikQRIS.
- * It should NOT require authentication (called by KlikQRIS server).
+ * Official KlikQRIS Webhook Callback
+ * Receives JSON webhook payload for status changes (PAID / EXPIRED / FAILED).
+ * Always responds with HTTP 200 OK to acknowledge receipt.
  */
 export async function POST(request: Request) {
   try {
     const payload = await request.json();
+    console.log("KlikQRIS Webhook received:", payload);
 
-    // Validate webhook
-    if (!klikqris.validateWebhook(payload)) {
-      return NextResponse.json(
-        { error: "Invalid webhook signature" },
-        { status: 401 }
-      );
+    const orderId = payload.order_id;
+    const rawStatus = (payload.status || "").toUpperCase();
+
+    if (!orderId) {
+      return NextResponse.json({ status: false, message: "Missing order_id" }, { status: 200 });
     }
 
-    const webhookData = klikqris.parseWebhook(payload);
-
-    // Find payment by transaction ID
-    const payment = await db.payment.findFirst({
-      where: { transactionId: webhookData.transactionId },
+    // Find order by orderNumber or ID
+    const order = await db.order.findFirst({
+      where: {
+        OR: [
+          { orderNumber: orderId },
+          { id: orderId },
+        ],
+      },
       include: {
-        order: {
+        payment: true,
+        items: {
           include: {
-            items: {
-              include: {
-                product: true,
-              },
-            },
+            product: true,
           },
         },
       },
     });
 
-    if (!payment) {
-      console.error(
-        "Payment not found for transaction:",
-        webhookData.transactionId
-      );
-      return NextResponse.json(
-        { error: "Payment not found" },
-        { status: 404 }
-      );
+    if (!order) {
+      console.warn("KlikQRIS Webhook: Order not found for order_id:", orderId);
+      return NextResponse.json({ status: true, message: "Order not found in database" });
     }
 
-    if (webhookData.status === "SUCCESS") {
-      // Update payment status
-      await db.payment.update({
-        where: { id: payment.id },
-        data: {
-          status: "SUCCESS",
-          paidAt: webhookData.paidAt || new Date(),
-        },
-      });
+    // 1. Prevent Double Processing (as required by KlikQRIS docs)
+    if (order.status === "PAID" || order.status === "COMPLETED") {
+      return NextResponse.json({ status: true, message: "Order already processed" });
+    }
 
-      // Update order status
+    const isPaid = rawStatus === "PAID" || rawStatus === "SUCCESS";
+
+    if (isPaid) {
+      // Update payment record
+      if (order.payment) {
+        await db.payment.update({
+          where: { id: order.payment.id },
+          data: {
+            status: "SUCCESS",
+            paidAt: payload.payment_date ? new Date(payload.payment_date) : new Date(),
+          },
+        });
+      }
+
+      // Update order status to PAID
       await db.order.update({
-        where: { id: payment.orderId },
+        where: { id: order.id },
         data: { status: "PAID" },
       });
 
-      // Auto-deliver digital codes
-      for (const item of payment.order.items) {
+      // Auto-deliver digital codes & update stock
+      for (const item of order.items) {
         const availableCodes = await db.digitalInventory.findMany({
           where: {
             productId: item.productId,
@@ -76,7 +78,6 @@ export async function POST(request: Request) {
 
         const deliveredCodes = availableCodes.map((inv) => inv.code);
 
-        // Mark inventory as sold
         if (availableCodes.length > 0) {
           await db.digitalInventory.updateMany({
             where: {
@@ -90,13 +91,11 @@ export async function POST(request: Request) {
           });
         }
 
-        // Store delivered codes on order item
         await db.orderItem.update({
           where: { id: item.id },
           data: { deliveredCodes },
         });
 
-        // Update product sold count and stock
         await db.product.update({
           where: { id: item.productId },
           data: {
@@ -106,58 +105,41 @@ export async function POST(request: Request) {
         });
       }
 
-      // Update order status to COMPLETED (auto-delivered)
+      // Update order to COMPLETED
       await db.order.update({
-        where: { id: payment.orderId },
+        where: { id: order.id },
         data: { status: "COMPLETED" },
       });
 
-      // Credit seller balance
-      const storeIds = [
-        ...new Set(payment.order.items.map((item) => item.product.storeId)),
-      ];
-
+      // Credit seller balance (90% revenue, 10% platform fee)
+      const storeIds = [...new Set(order.items.map((item) => item.product.storeId))];
       for (const storeId of storeIds) {
-        const storeItems = payment.order.items.filter(
-          (item) => item.product.storeId === storeId
-        );
-        const storeRevenue = storeItems.reduce(
-          (sum, item) => sum + Number(item.price) * item.quantity,
-          0
-        );
-
-        // Credit 90% to seller (10% platform fee)
+        const storeItems = order.items.filter((item) => item.product.storeId === storeId);
+        const storeRevenue = storeItems.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0);
         const sellerAmount = storeRevenue * 0.9;
         await db.store.update({
           where: { id: storeId },
-          data: {
-            balance: { increment: sellerAmount },
-          },
+          data: { balance: { increment: sellerAmount } },
         });
       }
-    } else if (
-      webhookData.status === "FAILED" ||
-      webhookData.status === "EXPIRED"
-    ) {
-      await db.payment.update({
-        where: { id: payment.id },
-        data: {
-          status: webhookData.status === "FAILED" ? "FAILED" : "EXPIRED",
-        },
-      });
+    } else if (rawStatus === "EXPIRED" || rawStatus === "FAILED") {
+      if (order.payment) {
+        await db.payment.update({
+          where: { id: order.payment.id },
+          data: { status: rawStatus === "FAILED" ? "FAILED" : "EXPIRED" },
+        });
+      }
 
       await db.order.update({
-        where: { id: payment.orderId },
+        where: { id: order.id },
         data: { status: "CANCELLED" },
       });
     }
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ status: true, message: "Webhook acknowledged" });
   } catch (error) {
-    console.error("Payment callback error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    console.error("KlikQRIS Webhook error:", error);
+    // Respond with 200 OK so KlikQRIS doesn't loop infinite retries
+    return NextResponse.json({ status: true, message: "Error handled" });
   }
 }

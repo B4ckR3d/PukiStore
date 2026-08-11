@@ -1,11 +1,6 @@
 /**
  * KlikQRIS Payment Gateway Client
- *
- * Integration with KlikQRIS for QRIS-based payments.
- * This module abstracts the KlikQRIS API calls for creating QRIS payments,
- * checking payment status, and processing webhook callbacks.
- *
- * @see https://klikqris.com for API documentation
+ * Updated to match Official KlikQRIS API Documentation (https://klikqris.com/api)
  */
 
 interface CreateQRISPayload {
@@ -19,11 +14,14 @@ interface CreateQRISPayload {
 interface QRISResponse {
   success: boolean;
   data?: {
+    orderId: string;
     transactionId: string;
     qrisUrl: string;
-    qrisData: string;
+    qrisImage?: string;
     amount: number;
+    totalAmount: number;
     expiredAt: string;
+    signature?: string;
   };
   message?: string;
 }
@@ -31,21 +29,14 @@ interface QRISResponse {
 interface PaymentStatusResponse {
   success: boolean;
   data?: {
-    transactionId: string;
-    status: "PENDING" | "SUCCESS" | "FAILED" | "EXPIRED";
+    orderId: string;
+    status: "PENDING" | "PAID" | "SUCCESS" | "FAILED" | "EXPIRED";
     amount: number;
+    totalAmount: number;
     paidAt?: string;
+    signature?: string;
   };
   message?: string;
-}
-
-interface WebhookPayload {
-  transaction_id: string;
-  merchant_id: string;
-  amount: number;
-  status: string;
-  paid_at?: string;
-  signature: string;
 }
 
 class KlikQRISClient {
@@ -56,40 +47,37 @@ class KlikQRISClient {
   constructor() {
     this.apiKey = process.env.KLIKQRIS_API_KEY || "";
     this.merchantId = process.env.KLIKQRIS_MERCHANT_ID || "";
-    this.baseUrl =
-      process.env.KLIKQRIS_BASE_URL || "https://klikqris.com/api";
+    this.baseUrl = process.env.KLIKQRIS_BASE_URL || "https://klikqris.com/api";
   }
 
   private getHeaders(): HeadersInit {
     return {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${this.apiKey}`,
-      "X-Merchant-ID": this.merchantId,
+      "x-api-key": this.apiKey,
+      "id_merchant": this.merchantId,
     };
   }
 
   /**
-   * Create a new QRIS payment
+   * Create a new QRIS payment (POST /qris/create)
    */
   async createPayment(payload: CreateQRISPayload): Promise<QRISResponse> {
     try {
-      // If no API key or placeholder key, use mock QRIS generator
       if (!this.apiKey || this.apiKey.startsWith("your_")) {
         return this.mockCreatePayment(payload);
       }
 
-      const response = await fetch(`${this.baseUrl}/v1/payment/create`, {
+      const response = await fetch(`${this.baseUrl}/qris/create`, {
         method: "POST",
         headers: this.getHeaders(),
         body: JSON.stringify({
-          merchant_id: this.merchantId,
-          amount: payload.amount,
           order_id: payload.orderId,
-          customer_name: payload.customerName,
-          customer_email: payload.customerEmail,
-          description:
-            payload.description || `Payment for order ${payload.orderId}`,
-          callback_url: process.env.KLIKQRIS_CALLBACK_URL,
+          id_merchant: this.merchantId,
+          amount: payload.amount,
+          keterangan: payload.description || `Pembayaran Order #${payload.orderId}`,
+          callback_url:
+            process.env.KLIKQRIS_CALLBACK_URL ||
+            `${process.env.NEXT_PUBLIC_APP_URL || "http://puki.web.id"}/api/payment/callback`,
         }),
       });
 
@@ -100,50 +88,50 @@ class KlikQRISClient {
         data = JSON.parse(responseText);
       } catch {
         console.error("KlikQRIS non-JSON response:", response.status, responseText);
-        // Fall back to mock QRIS if endpoint is unreachable or returns HTML error
         return this.mockCreatePayment(payload);
       }
 
-      if (data && data.success && data.data) {
+      if (data && (data.status === true || data.success === true) && data.data) {
         return {
           success: true,
           data: {
-            transactionId: data.data.transaction_id || `TXN-${payload.orderId}`,
-            qrisUrl: data.data.qris_url || `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=MOCK-QRIS-${payload.orderId}`,
-            qrisData: data.data.qris_data || "",
-            amount: data.data.amount || payload.amount,
-            expiredAt: data.data.expired_at || new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+            orderId: data.data.order_id || payload.orderId,
+            transactionId: data.data.order_id || payload.orderId,
+            qrisUrl:
+              data.data.qris_url ||
+              data.data.qris_image ||
+              `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=MOCK-QRIS-${payload.orderId}`,
+            qrisImage: data.data.qris_image,
+            amount: Number(data.data.amount) || payload.amount,
+            totalAmount: Number(data.data.total_amount) || payload.amount,
+            expiredAt: data.data.expired_at || new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+            signature: data.data.signature,
           },
           message: data.message,
         };
       }
 
-      // If KlikQRIS API returns failure (e.g. invalid merchant ID / credentials), fallback to mock in dev/demo
-      console.warn("KlikQRIS API request returned non-success data, falling back to mock:", data);
+      console.warn("KlikQRIS API returned non-success response, falling back to mock:", data);
       return this.mockCreatePayment(payload);
     } catch (error) {
       console.error("KlikQRIS createPayment error:", error);
-      // Fallback to mock QRIS if network fetch fails
       return this.mockCreatePayment(payload);
     }
   }
 
   /**
-   * Check payment status
+   * Check status manual (GET /qris/status/{order_id})
    */
-  async checkStatus(transactionId: string): Promise<PaymentStatusResponse> {
+  async checkStatus(orderId: string): Promise<PaymentStatusResponse> {
     try {
       if (!this.apiKey || this.apiKey.startsWith("your_")) {
-        return this.mockCheckStatus(transactionId);
+        return this.mockCheckStatus(orderId);
       }
 
-      const response = await fetch(
-        `${this.baseUrl}/v1/payment/status/${transactionId}`,
-        {
-          method: "GET",
-          headers: this.getHeaders(),
-        }
-      );
+      const response = await fetch(`${this.baseUrl}/qris/status/${orderId}`, {
+        method: "GET",
+        headers: this.getHeaders(),
+      });
 
       const responseText = await response.text();
       let data: any;
@@ -151,77 +139,65 @@ class KlikQRISClient {
       try {
         data = JSON.parse(responseText);
       } catch {
-        return this.mockCheckStatus(transactionId);
+        return this.mockCheckStatus(orderId);
       }
 
-      return {
-        success: data.success ?? response.ok,
-        data: data.data
-          ? {
-              transactionId: data.data.transaction_id,
-              status: data.data.status,
-              amount: data.data.amount,
-              paidAt: data.data.paid_at,
-            }
-          : undefined,
-        message: data.message,
-      };
+      if (data && (data.status === true || data.success === true) && data.data) {
+        const rawStatus = (data.data.status || "PENDING").toUpperCase();
+        let normalizedStatus: "PENDING" | "PAID" | "SUCCESS" | "FAILED" | "EXPIRED" = "PENDING";
+        if (rawStatus === "PAID" || rawStatus === "SUCCESS") normalizedStatus = "SUCCESS";
+        else if (rawStatus === "EXPIRED") normalizedStatus = "EXPIRED";
+        else if (rawStatus === "FAILED") normalizedStatus = "FAILED";
+
+        return {
+          success: true,
+          data: {
+            orderId: data.data.order_id,
+            status: normalizedStatus,
+            amount: Number(data.data.amount || 0),
+            totalAmount: Number(data.data.total_amount || 0),
+            paidAt: data.data.paid_at,
+            signature: data.data.signature,
+          },
+          message: data.message,
+        };
+      }
+
+      return this.mockCheckStatus(orderId);
     } catch (error) {
       console.error("KlikQRIS checkStatus error:", error);
-      return this.mockCheckStatus(transactionId);
+      return this.mockCheckStatus(orderId);
     }
   }
 
-  /**
-   * Validate webhook signature
-   */
-  validateWebhook(payload: WebhookPayload): boolean {
-    if (!this.apiKey || this.apiKey.startsWith("your_")) return true;
-    return payload.merchant_id === this.merchantId;
-  }
-
-  /**
-   * Parse webhook payload
-   */
-  parseWebhook(payload: WebhookPayload) {
-    return {
-      transactionId: payload.transaction_id,
-      merchantId: payload.merchant_id,
-      amount: payload.amount,
-      status: payload.status as "SUCCESS" | "FAILED" | "EXPIRED",
-      paidAt: payload.paid_at ? new Date(payload.paid_at) : undefined,
-    };
-  }
-
-  // ─── Mock Methods for Development & Fallback ───
-
   private mockCreatePayment(payload: CreateQRISPayload): QRISResponse {
-    const transactionId = `TXN-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const expiredAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 minutes
+    const expiredAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
     return {
       success: true,
       data: {
-        transactionId,
-        qrisUrl: `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=MOCK-QRIS-${transactionId}-${payload.amount}`,
-        qrisData: `00020101021226580014ID.CO.KLIKQRIS01189360${this.merchantId || "178617608180"}0215${payload.orderId}5303360540${payload.amount}5802ID5913PUKI STORE6013Jakarta Pus61051034062070703A01`,
+        orderId: payload.orderId,
+        transactionId: payload.orderId,
+        qrisUrl: `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=MOCK-QRIS-${payload.orderId}-${payload.amount}`,
         amount: payload.amount,
+        totalAmount: payload.amount,
         expiredAt,
+        signature: `MOCK_SIG_${payload.orderId}`,
       },
     };
   }
 
-  private mockCheckStatus(transactionId: string): PaymentStatusResponse {
+  private mockCheckStatus(orderId: string): PaymentStatusResponse {
     return {
       success: true,
       data: {
-        transactionId,
+        orderId,
         status: "PENDING",
         amount: 0,
+        totalAmount: 0,
       },
     };
   }
 }
 
-// Singleton instance
 export const klikqris = new KlikQRISClient();

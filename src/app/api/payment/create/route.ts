@@ -61,6 +61,8 @@ export async function POST(request: Request) {
       );
     }
 
+    const finalAmount = qrisResult.data.totalAmount || Number(order.totalAmount);
+
     // Create or update payment record
     const payment = await db.payment.upsert({
       where: { orderId: order.id },
@@ -68,17 +70,18 @@ export async function POST(request: Request) {
         orderId: order.id,
         method: "QRIS",
         status: "PENDING",
-        amount: order.totalAmount,
+        amount: finalAmount,
         qrisUrl: qrisResult.data.qrisUrl,
-        qrisData: qrisResult.data.qrisData,
-        transactionId: qrisResult.data.transactionId,
+        qrisData: qrisResult.data.qrisImage || qrisResult.data.qrisUrl,
+        transactionId: qrisResult.data.transactionId || order.orderNumber,
         expiredAt: new Date(qrisResult.data.expiredAt),
       },
       update: {
         qrisUrl: qrisResult.data.qrisUrl,
-        qrisData: qrisResult.data.qrisData,
-        transactionId: qrisResult.data.transactionId,
+        qrisData: qrisResult.data.qrisImage || qrisResult.data.qrisUrl,
+        transactionId: qrisResult.data.transactionId || order.orderNumber,
         expiredAt: new Date(qrisResult.data.expiredAt),
+        amount: finalAmount,
         status: "PENDING",
       },
     });
@@ -91,6 +94,7 @@ export async function POST(request: Request) {
         transactionId: payment.transactionId,
         amount: Number(payment.amount),
         expiredAt: payment.expiredAt,
+        signature: qrisResult.data.signature,
       },
     });
   } catch (error) {
